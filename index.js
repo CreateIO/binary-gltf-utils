@@ -112,7 +112,7 @@ fs.readFileAsync(filename, 'utf-8').then(function (gltf) {
   });
 
   const promises = [];
-  if (embed.shaders) Object.keys(scene.shaders).forEach(function (shaderId) {
+  if (embed.shaders && scene.shaders) Object.keys(scene.shaders).forEach(function (shaderId) {
     const shader = scene.shaders[shaderId];
     const uri = shader.uri;
     shader.uri = '';
@@ -132,7 +132,7 @@ fs.readFileAsync(filename, 'utf-8').then(function (gltf) {
   });
 
   // TODO: embed images into body (especially if already embedded as base64)
-  Object.keys(scene.images).forEach(function (imageId) {
+  if (scene.images) Object.keys(scene.images).forEach(function (imageId) {
     const image = scene.images[imageId];
     const uri = image.uri;
 
