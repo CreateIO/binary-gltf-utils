@@ -5,7 +5,10 @@
 const Promise = require('bluebird');
 const path = require('path');
 const util = require('util');
+const btoa = require('btoa');
 const fs = Promise.promisifyAll(require('fs'));
+
+const wantDefaultShader = true;
 
 const embedArr = [ 'textures', 'shaders', true ];
 const embed = {};
@@ -56,7 +59,16 @@ function addToBody(uri) {
   let promise;
   if (uri.startsWith('data:')) {
     if (!base64Regexp.test(uri)) throw new Error('unsupported data URI');
-    promise = Promise.resolve(new Buffer(uri.replace(base64Regexp, ''), 'base64'));
+
+    var uri2 = uri.replace(base64Regexp, '');
+    var contentType = uri.split(';')[0].replace('data:','')
+    if (contentType == 'text/plain') { 
+      uri2 = uri2.toString('utf-8');
+      //console.log(uri2);
+    }
+
+    var b = new Buffer(uri2, 'base64');
+    promise = Promise.resolve(b);
   }
   else promise = fs.readFileAsync(path.join(containingFolder, uri));
 
@@ -69,10 +81,46 @@ function addToBody(uri) {
   });
 }
 
-function processShaders(mdl) {
+function defaultShaders() {
+  var s = {
+    vertexShader: `precision highp float; 
+attribute vec3 a_position; 
+attribute vec3 a_normal; 
+varying vec3 v_normal; 
+uniform mat3 u_normalMatrix; 
+uniform mat4 u_modelViewMatrix; 
+uniform mat4 u_projectionMatrix;
+attribute float a_batchId;
+
+void main(void) { 
+vec4 pos = u_modelViewMatrix * vec4(a_position,1.0); 
+v_normal = u_normalMatrix * a_normal; 
+gl_Position = u_projectionMatrix * pos; 
+} 
+`,
+    featureShader: `precision highp float; 
+varying vec3 v_normal; 
+uniform vec4 u_diffuse; 
+uniform float u_transparency; 
+
+void main(void) { 
+u_transparency = 0.5;
+vec3 normal = normalize(v_normal); 
+vec4 color = vec4(0., 0., 0., 0.); 
+vec4 diffuse = vec4(0., 0., 0., 1.); 
+diffuse = u_diffuse; 
+// backface culling
+// diffuse.xyz *= max(dot(normal,vec3(0.,0.,1.)), 0.); 
+color.xyz += diffuse.xyz; 
+color = vec4(color.rgb * diffuse.a,  diffuse.a * u_transparency);
+
+gl_FragColor = color; 
 
 }
-
+`
+  }
+  return s;
+}
 
 fs.readFileAsync(filename, 'utf-8').then(function (gltf) {
   // Modify the GLTF data to reference the buffer in the body instead of external references.
@@ -122,8 +170,18 @@ fs.readFileAsync(filename, 'utf-8').then(function (gltf) {
     const shader = scene.shaders[shaderId];
     const uri = shader.uri;
     shader.uri = '';
+    var urx;
 
-    const promise = addToBody(uri).then(function (obj) {
+    if (wantDefaultShader == true) {
+      console.log("overriding provided shaders, if any");
+      var s = defaultShaders();
+      if (shaderId == 'd0FS')  { urx = 'data:text/plain;base64,' + btoa(s.featureShader); }
+      if (shaderId == 'd0VS')  { urx = 'data:text/plain;base64,' + btoa(s.vertexShader); }
+    } else {
+      urx = uri;
+    }
+
+    const promise = addToBody(urx).then(function (obj) {
       const bufferViewId = 'binary_shader_' + shaderId;
       shader.extensions = { KHR_binary_glTF: { bufferView: bufferViewId } };
 
@@ -135,6 +193,7 @@ fs.readFileAsync(filename, 'utf-8').then(function (gltf) {
     });
 
     promises.push(promise);
+
   });
 
   // TODO: embed images into body (especially if already embedded as base64)
@@ -164,15 +223,6 @@ fs.readFileAsync(filename, 'utf-8').then(function (gltf) {
     promises.push(promise);
   });
 
-  // "buffers":{"binary_glTF":{"type":"arraybuffer","byteLength":6491,"uri":"data:,"}}
-  //
-  // "bufferViews":{"bufferView_29":{"buffer":"binary_glTF","byteLength":720,"byteOffset":0,"target":34963},"bufferView_30":{"buffer":"binary_glTF","byteLength":3840,"byteOffset":720,"target":34962},"binary_bufferView0":{"buffer":"binary_glTF","byteLength":1106,"byteOffset":4560},"binary_bufferView1":{"buffer":"binary_glTF","byteLength":825,"byteOffset":5666}},"buffers":{"binary_glTF":{"type":"arraybuffer","byteLength":6491,"uri":"data:,"}}
-  //
-  //"shaders": {"d0FS": {"type": 35632, "uri": "data:text/plain;base64,cHJlY2lzaW9uIGhpZ2hwIGZsb2F0Owp2YXJ5aW5nIHZlYzMgdl9ub3JtYWw7CnVuaWZvcm0gdmVjNCB1X2FtYmllbnQ7CnVuaWZvcm0gdmVjNCB1X2RpZmZ1c2U7CnVuaWZvcm0gdmVjNCB1X2VtaXNzaW9uOwp1bmlmb3JtIHZlYzQgdV9zcGVjdWxhcjsKdW5pZm9ybSBmbG9hdCB1X3NoaW5pbmVzczsKdmFyeWluZyB2ZWMzIHZfbGlnaHQwRGlyZWN0aW9uOwp2YXJ5aW5nIHZlYzMgdl9wb3NpdGlvbjsKdW5pZm9ybSB2ZWMzIHVfbGlnaHQwQ29sb3I7CnVuaWZvcm0gZmxvYXQgdV90cmFuc3BhcmVuY3k7CnZvaWQgbWFpbih2b2lkKSB7CnZlYzMgbm9ybWFsID0gbm9ybWFsaXplKHZfbm9ybWFsKTsKdmVjNCBjb2xvciA9IHZlYzQoMC4sIDAuLCAwLiwgMC4pOwp2ZWM0IGRpZmZ1c2UgPSB2ZWM0KDAuLCAwLiwgMC4sIDEuKTsKdmVjMyBkaWZmdXNlTGlnaHQgPSB2ZWMzKDAuLCAwLiwgMC4pOwp2ZWM0IGVtaXNzaW9uOwp2ZWM0IGFtYmllbnQ7CnZlYzQgc3BlY3VsYXI7CmFtYmllbnQgPSB1X2FtYmllbnQ7CmRpZmZ1c2UgPSB1X2RpZmZ1c2U7CmVtaXNzaW9uID0gdV9lbWlzc2lvbjsKc3BlY3VsYXIgPSB1X3NwZWN1bGFyOwp2ZWMzIHNwZWN1bGFyTGlnaHQgPSB2ZWMzKDAuLCAwLiwgMC4pOwp7CmZsb2F0IHNwZWN1bGFySW50ZW5zaXR5ID0gMC47CmZsb2F0IGF0dGVudWF0aW9uID0gMS4wOwp2ZWMzIGwgPSBub3JtYWxpemUodl9saWdodDBEaXJlY3Rpb24pOwp2ZWMzIHZpZXdEaXIgPSAtbm9ybWFsaXplKHZfcG9zaXRpb24pOwpmbG9hdCBwaG9uZ1Rlcm0gPSBtYXgoMC4wLCBkb3QocmVmbGVjdCgtbCxub3JtYWwpLCB2aWV3RGlyKSk7CnNwZWN1bGFySW50ZW5zaXR5ID0gbWF4KDAuLCBwb3cocGhvbmdUZXJtICwgdV9zaGluaW5lc3MpKSAqIGF0dGVudWF0aW9uOwpzcGVjdWxhckxpZ2h0ICs9IHVfbGlnaHQwQ29sb3IgKiBzcGVjdWxhckludGVuc2l0eTsKZGlmZnVzZUxpZ2h0ICs9IHVfbGlnaHQwQ29sb3IgKiBtYXgoZG90KG5vcm1hbCxsKSwgMC4pICogYXR0ZW51YXRpb247Cn0Kc3BlY3VsYXIueHl6ICo9IHNwZWN1bGFyTGlnaHQ7CmNvbG9yLnh5eiArPSBzcGVjdWxhci54eXo7CmRpZmZ1c2UueHl6ICo9IGRpZmZ1c2VMaWdodDsKY29sb3IueHl6ICs9IGRpZmZ1c2UueHl6Owpjb2xvci54eXogKz0gZW1pc3Npb24ueHl6Owpjb2xvciA9IHZlYzQoY29sb3IucmdiICogZGlmZnVzZS5hLCBkaWZmdXNlLmEgKiB1X3RyYW5zcGFyZW5jeSk7CmdsX0ZyYWdDb2xvciA9IGNvbG9yOwp9Cg=="}
-  //
-  //"d0VS": {"type": 35633, "uri": "data:text/plain;base64,cHJlY2lzaW9uIGhpZ2hwIGZsb2F0OwphdHRyaWJ1dGUgdmVjMyBhX3Bvc2l0aW9uOwphdHRyaWJ1dGUgdmVjMyBhX25vcm1hbDsKdmFyeWluZyB2ZWMzIHZfbm9ybWFsOwp1bmlmb3JtIG1hdDMgdV9ub3JtYWxNYXRyaXg7CnVuaWZvcm0gbWF0NCB1X21vZGVsVmlld01hdHJpeDsKdW5pZm9ybSBtYXQ0IHVfcHJvamVjdGlvbk1hdHJpeDsKdmFyeWluZyB2ZWMzIHZfbGlnaHQwRGlyZWN0aW9uOwp2YXJ5aW5nIHZlYzMgdl9wb3NpdGlvbjsKdW5pZm9ybSBtYXQ0IHVfbGlnaHQwVHJhbnNmb3JtOwp2b2lkIG1haW4odm9pZCkgewp2ZWM0IHBvcyA9IHVfbW9kZWxWaWV3TWF0cml4ICogdmVjNChhX3Bvc2l0aW9uLDEuMCk7CnZfbm9ybWFsID0gdV9ub3JtYWxNYXRyaXggKiBhX25vcm1hbDsKdl9wb3NpdGlvbiA9IHBvcy54eXo7CnZfbGlnaHQwRGlyZWN0aW9uID0gbWF0Myh1X2xpZ2h0MFRyYW5zZm9ybSkgKiB2ZWMzKDAuLDAuLDEuKTsKZ2xfUG9zaXRpb24gPSB1X3Byb2plY3Rpb25NYXRyaXggKiBwb3M7Cn0K"}}
-  //
-  //"shaders":{"buildings_leaf0FS":{"type":35632,"uri":"data:,","extensions":{"KHR_binary_glTF":{"bufferView":"binary_bufferView0"}}},"buildings_leaf0VS":{"type":35633,"uri":"data:,","extensions":{"KHR_binary_glTF":{"bufferView":"binary_bufferView1"}}}}
   //
   // TODO: embed images into body (especially if already embedded as base64)
   if (scene.images) Object.keys(scene.images).forEach(function (imageId) {
