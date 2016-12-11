@@ -6,9 +6,8 @@ const Promise = require('bluebird');
 const path = require('path');
 const util = require('util');
 const btoa = require('btoa');
+const atob = require('atob');
 const fs = Promise.promisifyAll(require('fs'));
-
-const wantDefaultShader = true;
 
 const embedArr = [ 'textures', 'shaders', true ];
 const embed = {};
@@ -22,6 +21,8 @@ const argv = require('yargs')
   .alias('e', 'embed')
   .boolean('cesium')
   .describe('cesium', 'sets the old body buffer name for compatibility with Cesium')
+  .boolean('shaders')
+  .describe('shaders', 'overrides the shades with built in ones')
   .help('h')
   .alias('h', 'help')
   .argv;
@@ -39,6 +40,8 @@ if (argv.embed) {
 const filename = argv._[0];
 //const BUFFER_NAME = argv.cesium ? 'KHR_binary_glTF' : 'binary_glTF';
 const BUFFER_NAME = argv.cesium ? 'binary_glTF' : 'binary_glTF';
+
+const wantDefaultShader = argv.shaders ? true : false;
 
 if (!filename.endsWith('.gltf')) {
   console.error('Failed to create binary GLTF file:');
@@ -81,41 +84,76 @@ function addToBody(uri) {
   });
 }
 
+function alterMaterial(matl, ext) {
+  let promise;
+
+  matl.extensions =  ext;
+
+  promise = Promise.resolve(matl);
+
+  return promise.then(function (matl) {
+    return matl;
+  });
+}
+
 function defaultShaders() {
   var s = {
-    vertexShader: `precision highp float; 
-attribute vec3 a_position; 
-attribute vec3 a_normal; 
-varying vec3 v_normal; 
-uniform mat3 u_normalMatrix; 
-uniform mat4 u_modelViewMatrix; 
-uniform mat4 u_projectionMatrix;
-attribute float a_batchId;
+    vertexShader: `// Create VS
 
-void main(void) { 
-vec4 pos = u_modelViewMatrix * vec4(a_position,1.0); 
-v_normal = u_normalMatrix * a_normal; 
-gl_Position = u_projectionMatrix * pos; 
-} 
+precision highp float;
+
+attribute vec3 a_position;
+attribute vec3 a_normal;
+attribute vec3 a_batchId;
+varying vec3 v_normal;
+uniform mat4 u_modelViewMatrix;
+uniform mat4 u_projectionMatrix;
+uniform mat3 u_normalMatrix;
+
+void main(void) {
+  v_normal = u_normalMatrix * a_normal;
+
+  vec4 pos;
+  pos = u_modelViewMatrix * vec4(a_position,1.0);
+  gl_Position = u_projectionMatrix * pos;
+}
+
 `,
-    featureShader: `precision highp float; 
-varying vec3 v_normal; 
-uniform vec4 u_diffuse; 
+    featureShader: `// Create FS
+
+precision highp float;
+uniform vec4 u_ambient;
+uniform vec4 u_diffuse;
+uniform vec4 u_emission;
+uniform vec4 u_specular;
+uniform float u_shininess;
 uniform float u_transparency; 
 
-void main(void) { 
-u_transparency = 0.5;
-vec3 normal = normalize(v_normal); 
-vec4 color = vec4(0., 0., 0., 0.); 
-vec4 diffuse = vec4(0., 0., 0., 1.); 
-diffuse = u_diffuse; 
-// backface culling
-// diffuse.xyz *= max(dot(normal,vec3(0.,0.,1.)), 0.); 
-color.xyz += diffuse.xyz; 
-color = vec4(color.rgb * diffuse.a,  diffuse.a * u_transparency);
+varying vec3 v_position;
+varying vec3 v_normal;
 
-gl_FragColor = color; 
+void main(void) {
+vec3 normal = normalize(v_normal);
+if (gl_FrontFacing == false) normal = -normal;
+vec4 color = vec4(0., 0., 0., 0.);
+vec4 diffuse = vec4(0., 0., 0., 1.);
+vec3 diffuseLight = vec3(0., 0., 0.);
+vec4 emission;
+vec4 ambient;
+vec4 specular;
 
+ambient = u_ambient;
+diffuse = u_diffuse;
+emission = u_emission;
+specular = u_specular;
+
+color.xyz += specular.xyz;
+// brighten only
+diffuse.xyz *= max(dot(normal,vec3(0.,0.,1.)), 0.); 
+color.xyz += diffuse.xyz;
+color.xyz += emission.xyz;
+color = vec4(color.rgb * diffuse.a, diffuse.a * u_transparency);
+gl_FragColor = color;
 }
 `
   }
@@ -176,11 +214,26 @@ fs.readFileAsync(filename, 'utf-8').then(function (gltf) {
       console.log("overriding provided shaders, if any");
       var s = defaultShaders();
       if (shaderId == 'd0FS')  { urx = 'data:text/plain;base64,' + btoa(s.featureShader); }
-      if (shaderId == 'd0VS')  { urx = 'data:text/plain;base64,' + btoa(s.vertexShader); }
+      else if (shaderId == 'd0VS')  { urx = 'data:text/plain;base64,' + btoa(s.vertexShader); }
+      else { 
+ 	console.log("ShaderId: " + shaderId + " is not well known" );
+        if (shaderId.endsWith('FS')) { 
+            urx = 'data:text/plain;base64,' + btoa(s.featureShader);
+        } else if (shaderId.endsWith('VS')) {
+            urx = 'data:text/plain;base64,' + btoa(s.vertexShader);
+        } else {
+            urx = uri;
+        }
+      }
+      /*console.log(shaderId);
+      var fS = atob(urx.replace('data:text/plain;base64,',''));
+      console.log(fS + "\n");
+      */
     } else {
       urx = uri;
+      //var fS = atob(urx.replace('data:text/plain;base64,',''));
+      //console.log(fS + "\n");
     }
-
     const promise = addToBody(urx).then(function (obj) {
       const bufferViewId = 'binary_shader_' + shaderId;
       shader.extensions = { KHR_binary_glTF: { bufferView: bufferViewId } };
